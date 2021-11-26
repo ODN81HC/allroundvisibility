@@ -1,0 +1,124 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+# from stitch_v1 import Matcher, Stitcher
+import time
+import threading
+import os
+
+# import videos for testing
+
+videos = ['-Y+Y.mp4', '+X-Y.mp4']
+folderDir = './videos/cropped_and_transformed'
+
+cap = []
+for vid in videos:
+    cap.append(cv2.VideoCapture(os.path.join(folderDir, vid)))
+
+ret = [None] * len(videos)
+frame = [None] * len(videos)
+
+while True:
+    for i, c in enumerate(cap):
+        if c is not None:
+            ret[i], frame[i] = c.read()
+
+    left = cv2.rotate(frame[0], cv2.ROTATE_90_CLOCKWISE)
+    plt.figure()
+    plt.imshow(left)
+    plt.show()
+    top = frame[1]
+
+    surf = cv2.xfeatures2d.SURF_create()
+    FLANN_INDEX_KDTREE = 0
+    MIN_MATCH_COUNT = 10
+    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+    search_params = dict(checks=50)
+
+    left_kp, left_des = surf.detectAndCompute(left, None)
+    left_with_kp = cv2.drawKeypoints(left, left_kp[:50], None, (255, 0, 0), 4)
+    top_kp, top_des = surf.detectAndCompute(top, None)
+    top_with_kp = cv2.drawKeypoints(top, top_kp[:50], None, (255, 0, 0), 4)
+
+    # Plot the images with keypoints drawn
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+    fig.suptitle("Images with keypoints")
+    ax1.imshow(top_with_kp)
+    ax2.imshow(left_with_kp)
+    plt.show()
+
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    matches = flann.knnMatch(top_des, left_des, k=2)
+
+    # Need to draw only good matches, so create a mask
+    matchesMask = [[0, 0] for i in range(len(matches))]
+
+    # Ratio test as per Lowe's paper
+    good = []
+    for i, (m, n) in enumerate(matches):
+        if m.distance < 0.7*n.distance:
+            matchesMask[i] = [1,0]
+            good.append(m)
+
+    draw_params = dict(matchColor=(0, 255, 0),
+                        singlePointColor=(255, 0, 0),
+                        matchesMask=matchesMask,
+                        flags=0)
+
+    img = cv2.drawMatchesKnn(top, top_kp, left, left_kp, matches, None, **draw_params)
+    plt.imshow(img)
+    plt.show()
+
+    if len(good) > MIN_MATCH_COUNT:
+        src_pts = np.float32([top_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([left_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+
+        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        matchesMask = mask.ravel().tolist()
+
+        h, w = top.shape[:2]
+        pts = np.float32([[0, 0], [0, h-1], [w-1, h-1], [w-1, 0]]).reshape(-1, 1, 2)
+        pts_top = [[0, 0], [0, h-1], [w-1, h-1], [w-1, 0]]
+        for i in pts_top:
+            plt.imshow(top)
+            plt.plot(i[0], i[1], 'r*')
+        plt.show()
+        dst = cv2.perspectiveTransform(pts, M)
+        print([np.int32(dst)])
+        x_offset, y_offset = np.int32(dst)[0][0][0], np.int32(dst)[0][0][1]
+        plt.figure()
+        for i in np.int32(dst):
+            plt.imshow(left)
+            plt.plot(i[0][0], i[0][1], 'c+')
+        plt.show()
+        left_h, left_w = left.shape[:2]
+
+        background_img = np.zeros((3000, 3000, 3))
+        # Stitch the left image into the background
+        background_img[1000:1000+left_h, 1000:1000+left_w, :] = left/255.0
+        # Stich the top image on top of the left image
+        background_img[1000+y_offset:1000+y_offset+h, 1000+x_offset:1000+x_offset+w, :] = top/255.0
+        plt.figure()
+        plt.imshow(background_img)
+        plt.show()
+        left = cv2.polylines(left, [np.int32(dst)], True, 255, 3, cv2.LINE_AA)
+
+        x1, y1 = np.int32(dst)[0][0][0], np.int32(dst)[0][0][1]
+        x2, y2 = np.int32(dst)[1][0][0], np.int32(dst)[1][0][1]
+
+        # if abs(x1 - x2) > 30 or abs(y1 - y2) < 100:
+        #     break
+
+    else:
+        print("Not enough matches are found - %d/%d" % (len(good), MIN_MATCH_COUNT))
+        matchesMask = None
+
+    draw_params = dict(matchColor=(0, 255, 0), # draw matches in green color
+                    singlePointColor=None,
+                    matchesMask=matchesMask, # draw only inliers
+                    flags=2)
+
+    img3 = cv2.drawMatches(top, top_kp, left, left_kp, good, None, **draw_params)
+
+    plt.imshow(img3, 'gray')
+    plt.show()
